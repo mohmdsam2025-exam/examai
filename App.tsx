@@ -4,6 +4,8 @@ import { AppStep, UserState, Semester, Question, QuizResult, QuizHistoryItem, Ap
 import { searchTopics, generateQuiz } from './services/geminiService';
 import { Button } from './components/Button';
 
+const SAVE_KEY = 'examiai_quiz_progress';
+
 const INITIAL_USER_STATE: UserState = {
   name: '', grade: '', semester: Semester.FIRST, subject: '', selectedTopic: '', quizCount: 10,
 };
@@ -28,7 +30,7 @@ const SUBJECT_OPTIONS = [
 const INITIAL_USERS: AppUser[] = [
   { 
     id: 'admin_1', 
-    name: 'المشرف العام', 
+    name: 'admin', 
     role: UserRole.ADMIN, 
     password: '123', 
     mustChangePassword: true,
@@ -62,15 +64,37 @@ export default function App() {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [selectedAnswers, setSelectedAnswers] = useState<number[]>([]);
 
+  const [hasSavedProgress, setHasSavedProgress] = useState(false);
+
   // Timer States
   const [timeLeft, setTimeLeft] = useState<number>(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Load initial settings and check for saved progress
   useEffect(() => {
     document.body.style.fontFamily = `'${appConfig.fontFamily}', sans-serif`;
     if (isDarkMode) document.documentElement.classList.add('dark');
     else document.documentElement.classList.remove('dark');
+    
+    checkSavedProgress();
   }, [appConfig.fontFamily, isDarkMode]);
+
+  // Persistent Save Effect
+  useEffect(() => {
+    if (step === AppStep.QUIZ && loggedInUser) {
+      const progress = {
+        studentName: loggedInUser.name,
+        quizQuestions,
+        currentQuestionIndex,
+        selectedAnswers,
+        timeLeft,
+        userState,
+        resourceType,
+        timestamp: Date.now()
+      };
+      localStorage.setItem(SAVE_KEY, JSON.stringify(progress));
+    }
+  }, [currentQuestionIndex, selectedAnswers, timeLeft, step]);
 
   // Quiz Timer Effect
   useEffect(() => {
@@ -93,6 +117,37 @@ export default function App() {
     };
   }, [step, timeLeft]);
 
+  const checkSavedProgress = () => {
+    const saved = localStorage.getItem(SAVE_KEY);
+    if (saved) {
+      try {
+        const data = JSON.parse(saved);
+        if (Date.now() - data.timestamp < 24 * 60 * 60 * 1000) {
+          setHasSavedProgress(true);
+        } else {
+          localStorage.removeItem(SAVE_KEY);
+          setHasSavedProgress(false);
+        }
+      } catch (e) {
+        localStorage.removeItem(SAVE_KEY);
+      }
+    }
+  };
+
+  const handleResumeProgress = () => {
+    const saved = localStorage.getItem(SAVE_KEY);
+    if (saved) {
+      const data = JSON.parse(saved);
+      setQuizQuestions(data.quizQuestions);
+      setCurrentQuestionIndex(data.currentQuestionIndex);
+      setSelectedAnswers(data.selectedAnswers);
+      setTimeLeft(data.timeLeft);
+      setUserState(data.userState);
+      setResourceType(data.resourceType);
+      setStep(AppStep.QUIZ);
+    }
+  };
+
   const toggleTheme = () => setIsDarkMode(!isDarkMode);
 
   const handleUniversalLogin = (e: React.FormEvent) => {
@@ -111,6 +166,7 @@ export default function App() {
     else if (user.role === UserRole.TEACHER) setStep(AppStep.TEACHER_DASHBOARD);
     else {
       setUserState({ ...userState, name: user.name });
+      checkSavedProgress();
       setStep(AppStep.SELECTION);
     }
   };
@@ -128,19 +184,23 @@ export default function App() {
   const handleAddUser = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newUserForm.name || !newUserForm.password) return;
+    
+    const permissions = {
+      canCreateTests: newUserForm.role !== UserRole.STUDENT,
+      canViewReports: newUserForm.role !== UserRole.STUDENT,
+      canManageUsers: newUserForm.role === UserRole.ADMIN
+    };
+
     const newUser: AppUser = {
       id: Date.now().toString(),
       name: newUserForm.name,
       password: newUserForm.password,
       role: newUserForm.role,
       mustChangePassword: true,
-      permissions: {
-        canCreateTests: newUserForm.role !== UserRole.STUDENT,
-        canViewReports: newUserForm.role !== UserRole.STUDENT,
-        canManageUsers: newUserForm.role === UserRole.ADMIN
-      }
+      permissions
     };
-    setAppUsers([...appUsers, newUser]);
+    
+    setAppUsers(prev => [...prev, newUser]);
     setNewUserForm({ name: '', password: '', role: UserRole.TEACHER });
     alert(`تمت إضافة ${newUserForm.role} بنجاح.`);
   };
@@ -173,7 +233,6 @@ export default function App() {
       setQuizQuestions(questions);
       setSelectedAnswers(new Array(questions.length).fill(-1));
       setCurrentQuestionIndex(0);
-      // تخصيص دقيقة واحدة لكل سؤال
       setTimeLeft(questions.length * 60); 
       setStep(AppStep.QUIZ);
     } catch (err: any) {
@@ -185,6 +244,9 @@ export default function App() {
 
   const submitQuiz = () => {
     if (timerRef.current) clearInterval(timerRef.current);
+    localStorage.removeItem(SAVE_KEY);
+    setHasSavedProgress(false);
+    
     let score = 0;
     quizQuestions.forEach((q, idx) => {
       if (selectedAnswers[idx] === q.correctAnswerIndex) score++;
@@ -216,9 +278,16 @@ export default function App() {
     onHome: () => {
       if (loggedInUser?.role === UserRole.ADMIN) setStep(AppStep.ADMIN_DASHBOARD);
       else if (loggedInUser?.role === UserRole.TEACHER) setStep(AppStep.TEACHER_DASHBOARD);
-      else setStep(AppStep.SELECTION);
+      else {
+        checkSavedProgress();
+        setStep(AppStep.SELECTION);
+      }
     }, 
-    onLogout: () => { setStep(AppStep.LOGIN); setLoggedInUser(null); setLoginForm({name:'', password:''}); }, 
+    onLogout: () => { 
+      setStep(AppStep.LOGIN); 
+      setLoggedInUser(null); 
+      setLoginForm({name:'', password:''}); 
+    }, 
     isDarkMode, 
     toggleTheme 
   };
@@ -265,7 +334,7 @@ export default function App() {
   if (step === AppStep.CHANGE_PASSWORD_REQUIRED) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4 bg-slate-100 dark:bg-slate-900">
-        <div className="bg-white dark:bg-slate-800 p-10 rounded-[2.5rem] shadow-xl w-full max-sm border">
+        <div className="bg-white dark:bg-slate-800 p-10 rounded-[2.5rem] shadow-xl w-full max-w-sm border">
            <div className="text-center mb-6">
               <div className="text-4xl mb-2">🛡️</div>
               <h2 className="text-2xl font-black">تغيير كلمة المرور</h2>
@@ -435,6 +504,19 @@ export default function App() {
     return (
       <Layout title="استكشف دروسك اليوم" {...layoutProps}>
         <div className="max-w-xl mx-auto bg-white dark:bg-slate-800 p-10 rounded-[3rem] shadow-sm border">
+             {hasSavedProgress && (
+               <div className="mb-8 p-6 bg-amber-50 dark:bg-amber-900/20 border-2 border-amber-200 dark:border-amber-800 rounded-3xl animate-in slide-in-from-top-4 duration-500">
+                  <div className="flex items-center gap-4 mb-4">
+                    <span className="text-3xl">📝</span>
+                    <div className="text-right">
+                      <p className="font-black text-amber-800 dark:text-amber-200">لديك اختبار غير مكتمل!</p>
+                      <p className="text-xs text-amber-600 dark:text-amber-400 font-bold">يمكنك العودة وإكماله من حيث توقفت.</p>
+                    </div>
+                  </div>
+                  <Button onClick={handleResumeProgress} className="w-full py-4 bg-amber-600 hover:bg-amber-700 shadow-amber-200">استئناف الاختبار السابق</Button>
+               </div>
+             )}
+             
              <div className="flex justify-center mb-6">
                 <div className="text-6xl p-6 bg-slate-50 dark:bg-slate-700/50 rounded-full">📚</div>
              </div>
@@ -493,7 +575,10 @@ export default function App() {
             </div>
           )) : <div className="p-20 text-center text-slate-400 font-bold italic">عذراً، لم نتمكن من العثور على دروس..</div>}
           <div className="flex justify-center mt-12">
-            <Button variant="outline" onClick={() => setStep(AppStep.SELECTION)} className="px-12 py-3 rounded-2xl">الرجوع</Button>
+            <Button variant="outline" onClick={() => {
+              checkSavedProgress();
+              setStep(AppStep.SELECTION);
+            }} className="px-12 py-3 rounded-2xl">الرجوع</Button>
           </div>
         </div>
       </Layout>
@@ -502,13 +587,14 @@ export default function App() {
 
   if (step === AppStep.QUIZ) {
     const q = quizQuestions[currentQuestionIndex];
+    if (!q) return null;
+    
     const totalTime = quizQuestions.length * 60;
     const timePercentage = (timeLeft / totalTime) * 100;
 
     return (
       <Layout title={userState.selectedTopic} {...layoutProps}>
         <div className="max-w-2xl mx-auto bg-white dark:bg-slate-800 p-10 rounded-[3rem] shadow-sm border relative">
-          {/* Timer Component */}
           <div className="absolute top-[-20px] left-1/2 transform -translate-x-1/2 bg-white dark:bg-slate-700 border-2 border-indigo-500 rounded-full px-6 py-2 shadow-xl flex items-center gap-3 z-10">
             <span className="text-xl">⏱️</span>
             <span className={`text-xl font-black tracking-widest ${timeLeft < 60 ? 'text-red-500 animate-pulse' : 'text-indigo-600'}`}>
@@ -517,8 +603,12 @@ export default function App() {
           </div>
 
           <div className="flex justify-between items-center mb-10 mt-4 text-xs font-black text-slate-400 uppercase">
+            <div className="flex items-center gap-2">
+               <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
+               <span>تقدم محفوظ</span>
+            </div>
             <span>سؤال {currentQuestionIndex + 1} من {quizQuestions.length}</span>
-            <div className="w-40 bg-slate-100 dark:bg-slate-700 h-2.5 rounded-full overflow-hidden">
+            <div className="w-32 bg-slate-100 dark:bg-slate-700 h-2 rounded-full overflow-hidden">
               <div className={`h-full transition-all duration-500 bg-indigo-600`} style={{width: `${((currentQuestionIndex + 1) / quizQuestions.length) * 100}%`}} />
             </div>
           </div>
@@ -534,9 +624,9 @@ export default function App() {
                   const newAns = [...selectedAnswers];
                   newAns[currentQuestionIndex] = i;
                   setSelectedAnswers(newAns);
-                }} className={`p-5 rounded-2xl border-2 cursor-pointer transition-all flex items-center justify-between ${selectedAnswers[currentQuestionIndex] === i ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/40 font-black text-indigo-700' : 'hover:border-indigo-100 dark:hover:border-slate-600 border-slate-50 dark:border-slate-700 text-slate-600 dark:text-slate-300'}`}>
-                  <span>{opt}</span>
-                  {selectedAnswers[currentQuestionIndex] === i && <span className="bg-indigo-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-[10px]">✔</span>}
+                }} className={`p-5 rounded-2xl border-2 cursor-pointer transition-all flex items-center justify-between ${selectedAnswers[currentQuestionIndex] === i ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/40 font-black text-indigo-700 shadow-inner' : 'hover:border-indigo-100 dark:hover:border-slate-600 border-slate-50 dark:border-slate-700 text-slate-600 dark:text-slate-300'}`}>
+                  <span className="flex-1 text-right">{opt}</span>
+                  {selectedAnswers[currentQuestionIndex] === i && <span className="bg-indigo-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-[10px] mr-4">✔</span>}
                 </div>
               ))
             )}
@@ -551,7 +641,6 @@ export default function App() {
             )}
           </div>
 
-          {/* Time Bar */}
           <div className="mt-10 h-1 w-full bg-slate-50 dark:bg-slate-700 rounded-full overflow-hidden">
             <div 
               className={`h-full transition-all duration-1000 ${timeLeft < 60 ? 'bg-red-500' : 'bg-indigo-500'}`} 
@@ -566,7 +655,7 @@ export default function App() {
   if (step === AppStep.RESULTS && quizResult) {
     const isPassed = (quizResult.score / quizResult.total) * 100 >= appConfig.minPassingScore;
     return (
-      <Layout title="انتهى الوقت!" {...layoutProps}>
+      <Layout title="نتيجة الاختبار" {...layoutProps}>
         <div className="max-w-md mx-auto bg-white dark:bg-slate-800 p-12 rounded-[3rem] shadow-2xl text-center border-t-8 border-indigo-600">
            <div className="text-7xl mb-8">{isPassed ? '🏆' : '📚'}</div>
            <h2 className="text-3xl font-black mb-2 dark:text-white tracking-tighter">{isPassed ? 'بطل خارق!' : 'أداء جيد'}</h2>
